@@ -81,7 +81,7 @@ class ImageAnalysis(BaseModel):
 
 # 获取图片绝对路径（图片在当前脚本目录下）
 script_dir = Path(__file__).parent
-image_path = (script_dir / "20260129172715_135_6.jpg").resolve()
+image_path = (script_dir / "20260202161329_150_6.jpg").resolve()
 
 # 检查图片是否存在
 if not image_path.exists():
