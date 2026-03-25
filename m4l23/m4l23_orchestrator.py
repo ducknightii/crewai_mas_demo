@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 # ── 路径与项目根 sys.path ──────────────────────────────────────────────────────
 _HERE = Path(__file__).resolve().parent
-_PROJECT_ROOT = _HERE.parent.parent          # crewai_mas_demo 根目录
+_PROJECT_ROOT = _HERE.parent                 # crewai_mas_demo 根目录
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
