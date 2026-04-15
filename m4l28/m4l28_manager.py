@@ -1,21 +1,22 @@
 """
-课程：27｜Human as 甲方
+课程：28｜数字员工的自我进化
 示例文件：m4l28_manager.py
 
-Manager 三个 Crew：
-  RequirementsDiscoveryCrew  新增：需求澄清，用 requirements-discovery skill 发问，写 requirements.md
+Manager 五个 Crew：
+  RequirementsDiscoveryCrew  复用 L27：需求澄清，用 requirements-discovery skill 发问，写 requirements.md
   ManagerAssignCrew          复用 L26：读 SOP，向 PM 发送 task_assign
   ManagerReviewCrew          复用 L26：读 PM 回邮，验收产品文档
+  ManagerTeamRetroCrew       第28课新增：团队复盘，调用 team-retrospective skill
 
-与 m4l26_manager.py 的复用关系：
+与 m4l27_manager.py 的复用关系：
   - build_bootstrap_prompt / load_session_ctx / save_session_ctx / append_session_raw：完全复用
   - SkillLoaderTool / prune_tool_results / maybe_compress：完全复用
-  - ManagerAssignCrew / ManagerReviewCrew：结构完全复用，沙盒描述更新为 m4l28 路径
+  - RequirementsDiscoveryCrew / ManagerAssignCrew / ManagerReviewCrew：结构完全复用
 
 第28课新增：
-  - RequirementsDiscoveryCrew：使用 requirements-discovery skill，写 requirements.md
-  - 沙盒挂载新增 /mnt/shared/sop 目录（Manager 读取 SOP 文件）
-  - 单一接口约束：Manager 不直接写 human.json；由 run.py 编排
+  - ManagerTeamRetroCrew：通过 team-retrospective Skill 执行团队复盘
+    （之前硬编码直接调用 Python 函数，现改为通过 Skill 体系在沙盒中执行）
+  - 沙盒挂载新增 /mnt/shared/logs（三层日志）、/mnt/shared/proposals（改进提案）
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ from crewai.hooks import LLMCallHookContext, before_llm_call, clear_before_llm_c
 from crewai.project import CrewBase, agent, crew, task
 
 # ── 路径设置 ──────────────────────────────────────────────────────────────────
-_M4L27_DIR    = Path(__file__).resolve().parent
-_PROJECT_ROOT = _M4L27_DIR.parent
-for _p in [str(_PROJECT_ROOT), str(_M4L27_DIR)]:
+_M4L28_DIR    = Path(__file__).resolve().parent
+_PROJECT_ROOT = _M4L28_DIR.parent
+for _p in [str(_PROJECT_ROOT), str(_M4L28_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -50,16 +51,16 @@ from m3l20.m3l20_file_memory import (                # noqa: E402
 # 路径常量
 # ─────────────────────────────────────────────────────────────────────────────
 
-WORKSPACE_DIR  = _M4L27_DIR / "workspace" / "manager"
+WORKSPACE_DIR  = _M4L28_DIR / "workspace" / "manager"
 SESSIONS_DIR   = WORKSPACE_DIR / "sessions"
-SHARED_DIR     = _M4L27_DIR / "workspace" / "shared"
+SHARED_DIR     = _M4L28_DIR / "workspace" / "shared"
 MAILBOXES_DIR  = SHARED_DIR / "mailboxes"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 沙盒挂载描述（Manager）
 # ─────────────────────────────────────────────────────────────────────────────
 
-M4L27_MANAGER_SANDBOX_MOUNT_DESC = (
+M4L28_MANAGER_SANDBOX_MOUNT_DESC = (
     "1. 所有的操作必须在沙盒中执行，不得操作本地文件系统。\n"
     "   当前已挂载的目录：\n"
     "   - ./workspace/manager:/workspace:rw（Manager 个人区，可读写）\n"
@@ -70,7 +71,9 @@ M4L27_MANAGER_SANDBOX_MOUNT_DESC = (
     "   - 需求文档：/mnt/shared/needs/requirements.md（Manager 可写）\n"
     "   - 产品文档：/mnt/shared/design/product_spec.md（只读，PM 负责写入）\n"
     "   - SOP 目录：/mnt/shared/sop/（只读，Manager 读取 SOP 文件）\n"
-    "   - 邮箱：/mnt/shared/mailboxes/（通过 mailbox-ops skill 操作）\n\n"
+    "   - 邮箱：/mnt/shared/mailboxes/（通过 mailbox-ops skill 操作）\n"
+    "   - 日志：/mnt/shared/logs/（三层日志，L1/L2/L3，通过 skill 读取）\n"
+    "   - 提案：/mnt/shared/proposals/（改进提案，通过 skill 写入）\n\n"
     "3. 参考型 Skill（type: reference）：内容直接注入上下文，无需沙盒\n\n"
     "4. 如遇依赖缺失，先在沙盒中安装再继续"
 )
@@ -115,7 +118,7 @@ class _SessionMixin:
             backstory = build_bootstrap_prompt(WORKSPACE_DIR),
             llm       = aliyun_llm.AliyunLLM(model="qwen-max", temperature=0.3),
             tools     = [SkillLoaderTool(
-                sandbox_mount_desc=M4L27_MANAGER_SANDBOX_MOUNT_DESC,
+                sandbox_mount_desc=M4L28_MANAGER_SANDBOX_MOUNT_DESC,
                 sandbox_mcp_url="http://localhost:8027/mcp",
             )],
             verbose   = True,
@@ -302,11 +305,81 @@ class ManagerReviewCrew(_SessionMixin):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Crew 4：团队复盘（第28课新增）
+# ─────────────────────────────────────────────────────────────────────────────
+
+@CrewBase
+class ManagerTeamRetroCrew(_SessionMixin):
+    """
+    Manager 团队复盘阶段（第28课核心教学点 P5）：
+
+    通过 team-retrospective Skill 在沙盒中执行：
+      1. 聚合所有 Agent 的 L2 质量指标
+      2. 统计 L1 人类纠正事件
+      3. 识别瓶颈 Agent，发邮件触发其自我复盘
+      4. 调用 LLM 生成团队级改进提案
+      5. 向 human.json 发送周报
+
+    设计原则：复盘逻辑封装在 Skill 脚本内，Manager Agent 只负责调用，
+    不再硬编码 Python 函数直接导入。
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self._init_session_state(SESSIONS_DIR)
+
+    @agent
+    def manager_agent(self) -> Agent:
+        return self._build_agent(
+            role = "项目经理（Manager）",
+            goal = "执行团队复盘，分析 Agent 质量指标，识别瓶颈，生成团队改进提案，发送周报",
+        )
+
+    @task
+    def team_retro_task(self) -> Task:
+        return Task(
+            description     = "{user_request}",
+            expected_output = (
+                "完成以下步骤：\n"
+                "1. 安装依赖：pip install openai filelock -q\n"
+                "2. 执行团队复盘 skill：\n"
+                "   python3 /mnt/skills/team-retrospective/scripts/team_retro.py \\\n"
+                "     --logs-dir /mnt/shared/logs \\\n"
+                "     --mailbox-dir /mnt/shared/mailboxes \\\n"
+                "     --manager-id manager \\\n"
+                "     --agent-ids pm,manager \\\n"
+                "     --days 7\n"
+                "3. 读取脚本的 JSON 输出（必须实际执行，不得伪造结果）\n"
+                "4. 将脚本输出的 JSON 原文包含在回复中，并输出复盘摘要：\n"
+                "   - 各 Agent 质量指标\n"
+                "   - 识别到的瓶颈 Agent\n"
+                "   - 生成的团队提案数量\n"
+                "确认执行完成后输出：「团队复盘完成，结果：{脚本输出 JSON}」"
+            ),
+            agent = self.manager_agent(),
+        )
+
+    @crew
+    def crew(self) -> Crew:
+        return Crew(agents=self.agents, tasks=self.tasks, verbose=True)
+
+    @before_llm_call
+    def before_llm_hook(self, context: LLMCallHookContext) -> bool | None:
+        if not self._session_loaded:
+            self._restore_session(context)
+            self._session_loaded = True
+        self._last_msgs = context.messages
+        prune_tool_results(context.messages)
+        maybe_compress(context.messages, context)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 公共辅助函数
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_session(
-    crew_instance: RequirementsDiscoveryCrew | ManagerAssignCrew | ManagerReviewCrew,
+    crew_instance: RequirementsDiscoveryCrew | ManagerAssignCrew | ManagerReviewCrew | ManagerTeamRetroCrew,
     session_id: str,
 ) -> None:
     """保存 session 上下文（复用 m3l20 逻辑）"""

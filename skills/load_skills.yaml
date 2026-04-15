@@ -71,6 +71,17 @@ skills:
     type: task        # 需要执行脚本（filelock JSON 读写），在 AIO-Sandbox 中运行
     enabled: true
 
+  # m4l28：数字员工的自我进化 Skills
+  - name: self-retrospective
+    path: ./self-retrospective
+    type: task        # 读取 L2/L3/L1 日志，调用 LLM 生成改进提案，在 AIO-Sandbox 中运行
+    enabled: true
+
+  - name: team-retrospective
+    path: ./team-retrospective
+    type: task        # 聚合所有 Agent 质量指标，识别瓶颈，发周报，在 AIO-Sandbox 中运行
+    enabled: true
+
   # 预留：参考型 Skill 示例（如品牌规范、代码规范等）
   # - name: brand-guidelines
   #   path: ./brand-guidelines

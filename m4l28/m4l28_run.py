@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from filelock import FileLock
@@ -135,12 +136,11 @@ def run_demo(initial_request: str = "") -> None:
         RequirementsDiscoveryCrew,
         ManagerAssignCrew,
         ManagerReviewCrew,
+        ManagerTeamRetroCrew,
         save_session as manager_save,
     )
-    from m4l28_pm import PMExecuteCrew, save_session as pm_save
+    from m4l28_pm import PMExecuteCrew, PMSelfRetroCrew, save_session as pm_save
     from seed_logs import seed_logs
-    from retro.self_retrospective import run_self_retrospective
-    from retro.team_retrospective import run_team_retrospective
 
     session_id = str(uuid.uuid4())
     if not initial_request:
@@ -210,7 +210,7 @@ def run_demo(initial_request: str = "") -> None:
             "result_quality": 0.75,   # 演示用固定值
             "duration_sec":   0,
             "error_type":     None,
-            "timestamp":      __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "timestamp":      datetime.now(timezone.utc).isoformat(),
         },
     )
     print("✅ 第28课：PM L2 日志已写入\n")
@@ -250,29 +250,29 @@ def run_demo(initial_request: str = "") -> None:
     print("⏳ 预置历史日志（模拟团队已运行 7 天）...\n")
     seed_logs(base_dir=_M4L28_DIR / "workspace")
 
-    # 自我复盘
+    # 自我复盘（通过 PMSelfRetroCrew + self-retrospective Skill 在沙盒中执行）
     print(f"\n{'─'*50}")
-    print("  🔍 触发 PM Agent 自我复盘")
+    print("  🔍 触发 PM Agent 自我复盘（Skill 体系）")
     print(f"{'─'*50}\n")
-    proposals = run_self_retrospective(
-        agent_id    = "pm",
-        logs_dir    = LOGS_DIR,
-        mailbox_dir = MAILBOXES_DIR,
-        days        = 7,
-        min_tasks   = 5,
-    )
+    clear_before_llm_call_hooks()
+    self_retro_crew = PMSelfRetroCrew(session_id=session_id)
+    self_retro_crew.crew().kickoff(inputs={"user_request": (
+        "请执行 PM 自我复盘：分析过去7天的任务日志，"
+        "使用 self-retrospective skill 生成改进提案，并发送至 human.json 等待审批。"
+    )})
+    pm_save(self_retro_crew, session_id)
 
-    # 团队复盘
+    # 团队复盘（通过 ManagerTeamRetroCrew + team-retrospective Skill 在沙盒中执行）
     print(f"\n{'─'*50}")
-    print("  📋 触发 Manager 团队复盘")
+    print("  📋 触发 Manager 团队复盘（Skill 体系）")
     print(f"{'─'*50}\n")
-    run_team_retrospective(
-        manager_id  = "manager",
-        agent_ids   = ["pm", "manager"],
-        logs_dir    = LOGS_DIR,
-        mailbox_dir = MAILBOXES_DIR,
-        days        = 7,
-    )
+    clear_before_llm_call_hooks()
+    team_retro_crew = ManagerTeamRetroCrew(session_id=session_id)
+    team_retro_crew.crew().kickoff(inputs={"user_request": (
+        "请执行团队复盘：统计 PM 和 Manager 过去7天的质量指标，"
+        "识别瓶颈 Agent，生成团队级改进提案，并向 human.json 发送周报。"
+    )})
+    manager_save(team_retro_crew, session_id)
 
     print(f"\n{'='*60}")
     print("  ✅ 第28课演示完成！")

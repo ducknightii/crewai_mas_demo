@@ -1,12 +1,12 @@
 [
   {
-    "id": "d670f2d1-be03-4ed1-be39-5f06bb1c1aa6",
+    "id": "ca650a99-8ac4-45a8-8705-2970bbda4e5e",
     "from": "pm",
     "to": "manager",
     "type": "task_done",
     "subject": "产品文档已完成",
-    "content": "经理您好，\n\n根据您的要求，我已完成了产品规格文档的撰写。文档已存放在 /mnt/shared/design/product_spec.md，请您查阅。\n\n如有任何问题或需要进一步讨论的地方，请随时与我联系。\n\n谢谢！\nPM",
-    "timestamp": "2026-04-14T16:19:04.792068+00:00",
+    "content": "尊敬的Manager，\n\n产品规格文档已经完成，请参阅 /mnt/shared/design/product_spec.md 查看详细内容。\n\n此致\n敬礼\nPM团队",
+    "timestamp": "2026-04-14T18:03:30.119132+00:00",
     "read": true
   }
 ]
