@@ -1,0 +1,9 @@
+{
+  "agent_id": "pm",
+  "task_id": "t003",
+  "task_desc": "产品设计文档v2（用户登录）",
+  "result_quality": 0.42,
+  "duration_sec": 200,
+  "error_type": "checkpoint_rejected",
+  "timestamp": "2026-04-15T13:13:28.453531+00:00"
+}

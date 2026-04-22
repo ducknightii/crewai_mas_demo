@@ -108,59 +108,103 @@ class AliyunLLM(BaseLLM):
                 _rc = 2
         self.retry_count = _rc if _rc is not None else 2
 
-    def _normalize_multimodal_tool_result(self, messages: list[dict[str, Any]]) -> Tuple[list[dict[str, Any]], bool]:
+    def _normalize_multimodal_tool_result(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
         """
         将 CrewAI 对 AddImageTool/AddImageToolLocal 的 stringify 结果还原为多模态 user 消息，
         否则 DashScope 会因消息格式或体积返回 400。
 
+        兼容两种 Agent 调用模式：
+        - 旧版 ReAct：base64/URL 在 assistant 消息的 content 字符串中（Thought/Action/Observation）
+        - 新版 Function Calling：base64 在 role=tool 消息的 content 中，图片合并到紧随其后的 user
+          消息。假设 user 消息紧跟在所有 tool 消息之后（CrewAI 当前行为）；若消息列表以 tool 结尾
+          则自动 flush 一条合成 user 消息。
+
         Returns:
-            Tuple[list[dict[str, Any]], bool]: 返回处理后的消息列表和是否使用多模态模型
+            tuple[list[dict[str, Any]], bool]: 处理后的消息列表 + 是否需要切换多模态模型
         """
         out: list[dict[str, Any]] = []
-        default_text = "请根据这张图片的内容进行分析。"
         flag = False
+        # function calling 模式：累积待注入到下一条 user 消息的图片 URL 列表
+        # 用列表支持同一轮多个 tool 返回图片的情况
+        pending_images: list[str] = []
+
         for msg in messages:
+            role = msg.get("role")
             content = msg.get("content")
-            if msg.get("role") != "assistant" or content is None or not isinstance(content, str):
-                out.append(msg)
-                continue
-            s = content
-            # 已包含 base64 data URL（来自 AddImageToolLocal）
-            if "Add image to content Local" in s and ("data:image/" in s and ";base64," in s):
-                logger.info("normalized_multimodal_tool_result injected user message (base64 from tool)")
-                idx = s.find("data:image/")
-                data_url = s[idx:]
-                #logger.info("normalized_multimodal_tool_result injected user message (base64 from tool) data_url_len=%s", len(data_url))
-                text = s[:idx]+"图片内容已加载"
-                user_msg = {
-                    "role": "user",
-                    "content": [
-                        {"type": "text",  "text": text},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-                #logger.info("normalized_multimodal_tool_result injected user message (base64 from tool) user_msg=%s", user_msg)
-                out.append(user_msg)
+
+            # ── 新版 Function Calling：tool 消息 content 含 base64 data URL ───
+            if role == "tool" and isinstance(content, str) and "data:image/" in content and ";base64," in content:
+                data_url_start = content.find("data:image/")
+                prefix = content[:data_url_start]
+                data_url = content[data_url_start:]
+                pending_images.append(data_url)
+                new_msg = dict(msg)
+                new_msg["content"] = (prefix + "图片内容已加载") if prefix else "图片内容已加载"
+                out.append(new_msg)
                 flag = True
+                logger.info("normalized_multimodal_tool_result: function calling mode, base64 in tool message")
                 continue
-            elif "Add image to content Local" in s and "Observation: http" in s:
-                idx = s.find("Observation: http")
-                
-                data_url = "http"+s[idx:]
-                text = s[:idx]+"图片内容已加载"
-                user_msg = {
+
+            # ── 新版 Function Calling：把图片合并到紧随其后的 user 消息 ──────
+            # 注：仅在紧跟 tool 消息的第一条 user 消息时触发，与 CrewAI 当前消息结构一致
+            if pending_images and role == "user":
+                text = content if isinstance(content, str) else ""
+                image_blocks = [{"type": "image_url", "image_url": {"url": u}} for u in pending_images]
+                out.append({
                     "role": "user",
-                    "content": [
-                        {"type": "text", "text": text},
-                        {"type": "image", "image": data_url},
-                    ],
-                }
-                out.append(user_msg)
-                flag = True
-                #logger.info("normalized_multimodal_tool_result injected user message (base64 from tool)")
+                    "content": [{"type": "text", "text": text}] + image_blocks,
+                })
+                pending_images = []
+                logger.info("normalized_multimodal_tool_result: injected %d image(s) into user message (function calling)", len(image_blocks))
                 continue
+
+            # ── 旧版 ReAct：assistant 消息 content 字符串含 Observation base64 ─
+            # content 可能是 None（tool_calls 消息）或 list（多模态 assistant），均跳过
+            if role == "assistant" and isinstance(content, str):
+                s = content
+                if "Add image to content Local" in s and "data:image/" in s and ";base64," in s:
+                    logger.info("normalized_multimodal_tool_result: ReAct mode, base64 in assistant message")
+                    data_url_start = s.find("data:image/")
+                    data_url = s[data_url_start:]
+                    text = s[:data_url_start] + "图片内容已加载"
+                    out.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    })
+                    flag = True
+                    continue
+                elif "Add image to content Local" in s and "Observation: http" in s:
+                    obs_start = s.find("Observation: http")
+                    http_start = s.find("http", obs_start)
+                    data_url = s[http_start:]
+                    text = s[:obs_start] + "图片内容已加载"
+                    out.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": text},
+                            {"type": "image", "image": data_url},
+                        ],
+                    })
+                    flag = True
+                    continue
+
             out.append(msg)
-        #logger.info("normalized_multimodal_tool_result flag=%s out=%s", flag, json.dumps(out, ensure_ascii=False, indent=2))
+
+        # ── Flush：tool 消息是最后一条（后面没有 user 消息）时合成一条 user 消息 ─
+        if pending_images:
+            image_blocks = [{"type": "image_url", "image_url": {"url": u}} for u in pending_images]
+            out.append({
+                "role": "user",
+                "content": [{"type": "text", "text": "请分析上面工具返回的图片内容。"}] + image_blocks,
+            })
+            logger.warning(
+                "normalized_multimodal_tool_result: flushed %d pending image(s) — tool message was last in list",
+                len(image_blocks),
+            )
+
         return out, flag
 
     def call(
@@ -220,12 +264,9 @@ class AliyunLLM(BaseLLM):
                     except Exception:
                         pass
 
-        logger.info(
-            "发送 LLM API 请求 endpoint=%s model=%s payload=%s",
-            self.endpoint,
-            payload,
-            messages,
-        )
+        logger.info("发送 LLM API 请求 endpoint=%s model=%s", self.endpoint, payload.get("model"))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("发送 LLM API 请求 payload=%s", json.dumps(payload, ensure_ascii=False, indent=2))
         last_exception: BaseException | None = None
         result: dict[str, Any] = {}
         for attempt in range(self.retry_count + 1):

@@ -284,7 +284,7 @@ class XiaoPawCrew:
             goal      = "帮助晓寒高效完成各类任务，严谨、结果导向",
             backstory = build_bootstrap_prompt(WORKSPACE_DIR),   # 💡 Bootstrap
             llm       = aliyun_llm.AliyunLLM(
-                model   = "qwen3-max",
+                model   = "qwen3.6-max-preview",
                 api_key = os.getenv("QWEN_API_KEY"),
                 region  = "cn",
             ),

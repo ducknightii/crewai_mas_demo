@@ -38,8 +38,8 @@ EMBED_MODEL   = "text-embedding-v3"       # 通义中文优化 embedding
 EMBED_DIM     = 1024
 # 提取摘要+标签的模型。
 # 课程设计原本建议使用轻量模型（如 qwen3-turbo）以控制成本；
-# 考虑到部分环境未开通 turbo，为保证 demo 可跑通，这里默认使用 qwen3-max。
-EXTRACT_MODEL = "qwen3-max"
+# 考虑到部分环境未开通 turbo，为保证 demo 可跑通，这里默认使用 qwen3.6-max-preview。
+EXTRACT_MODEL = "qwen3.6-max-preview"
 
 # 通义 embedding API（兼容 OpenAI SDK）
 _embed_client = OpenAI(
@@ -120,7 +120,7 @@ _EXTRACT_PROMPT = """\
 def extract_summary_and_tags(user_message: str, assistant_reply: str) -> tuple[str, list[str]]:
     """
     💡 核心点：每轮只调用一次模型，做结构化提取（摘要 + 标签）
-    默认模型为 qwen3-max（兼容性优先）；如环境支持，可切换轻量模型以节省成本
+    默认模型为 qwen3.6-max-preview（兼容性优先）；如环境支持，可切换轻量模型以节省成本
     """
     prompt = _EXTRACT_PROMPT.format(
         user_message    = user_message[:500],    # 截断防止超长

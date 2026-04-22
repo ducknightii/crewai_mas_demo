@@ -9,12 +9,13 @@
   - reject + retry：主 Agent 验收不通过时重新 spawn 修复子 Agent
 
 运行方式：
-  cd m4l23~28/m4l23 && python3 m4l23_orchestrator.py
+  cd m4l23 && python3 m4l23_orchestrator.py
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,7 +24,8 @@ from typing import Any, Type
 
 from crewai import Agent, Crew, Task
 from crewai.tools import BaseTool
-from crewai_tools import FileReadTool, FileWriterTool
+from crewai_tools import FileReadTool
+from crewai_tools.tools.file_writer_tool.file_writer_tool import strtobool
 from pydantic import BaseModel, Field
 
 # ── 路径与项目根 sys.path ──────────────────────────────────────────────────────
@@ -42,10 +44,16 @@ REQUIREMENTS_FILE = WORKSPACE_DIR / "requirements.md"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM 工厂
+# - 主 Orchestrator 与所有子 Agent：qwen3.6-max-preview
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _llm() -> AliyunLLM:
-    return AliyunLLM(model="qwen-plus", region="cn", temperature=0.7)
+def _llm(model: str = "qwen3.6-max-preview") -> AliyunLLM:
+    return AliyunLLM(model=model, region="cn", temperature=0.7)
+
+
+def _llm_for_sub_agent(role: str) -> AliyunLLM:
+    """所有子 Agent 统一使用 qwen3.6-max-preview。"""
+    return _llm("qwen3.6-max-preview")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,8 +67,10 @@ class _BashInput(BaseModel):
 class BashTool(BaseTool):
     name: str = "BashTool"
     description: str = (
-        "在 workspace 目录下执行 Shell 命令，返回 stdout + stderr。"
+        "在 workspace 目录下执行 Shell 命令（cwd 已是本课 workspace 根目录），返回 stdout + stderr。"
         "适用于：运行 pytest、查看目录结构、执行 curl 等。"
+        "禁止用相对路径创建 `Users/...` 或 `workspace/...` 误目录（会出现在 workspace 下嵌套假路径）；"
+        "应使用绝对路径或相对当前目录的 `design/`、`tests/` 等。"
     )
     args_schema: Type[BaseModel] = _BashInput
 
@@ -78,13 +88,134 @@ class BashTool(BaseTool):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 路径解析：统一修正 LLM 常见误写
+# 1) Users/xiao/... 无 leading / → 被 shell/cwd 当成相对路径 → workspace/Users/xiao/...
+# 2) directory 写成 workspace/design（本课 cwd 已是 workspace）→ 误生成 workspace/workspace/design
+# 3) 绝对路径里已出现 .../workspace/workspace/... → 折叠一层
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _collapse_double_workspace_segment(p: Path) -> Path:
+    """若路径中出现 .../workspace/workspace/...，折叠为 .../workspace/...。"""
+    s = str(p.resolve())
+    ws = str(WORKSPACE_DIR.resolve())
+    double = ws + "/workspace"
+    if s.startswith(double):
+        remainder = s[len(double) :].lstrip("/")
+        return Path(ws) / remainder if remainder else Path(ws)
+    return p
+
+
+def _resolve_workspace_path(path_str: str) -> Path:
+    """将 LLM 给出的单一路径段解析为绝对路径（用于目录或单文件）。"""
+    raw = str(path_str).strip().replace("\\", "/")
+    if not raw:
+        return WORKSPACE_DIR
+    while raw.startswith("./"):
+        raw = raw[2:]
+    p = Path(raw)
+    if p.is_absolute():
+        rp = p.resolve()
+        return _collapse_double_workspace_segment(rp)
+    if raw.lower().startswith("users/"):
+        return _collapse_double_workspace_segment((Path("/") / raw).resolve())
+    # 已处在 workspace 目录下却又写了 workspace/xxx
+    if raw == "workspace" or raw.startswith("workspace/"):
+        rest = raw[len("workspace") :].lstrip("/") or "."
+        return _collapse_double_workspace_segment((WORKSPACE_DIR / rest).resolve())
+    return _collapse_double_workspace_segment((WORKSPACE_DIR / raw).resolve())
+
+
+def _resolve_workspace_filepath(directory: str | None, filename: str) -> Path:
+    """组合 directory + filename，并消除重复 workspace 段。"""
+    fn = str(filename).strip().replace("\\", "/")
+    if not fn:
+        return _resolve_workspace_path(directory or ".")
+    if Path(fn).is_absolute():
+        return _resolve_workspace_path(fn)
+    while fn.startswith("./"):
+        fn = fn[2:]
+    if fn == "workspace" or fn.startswith("workspace/"):
+        fn = fn[len("workspace") :].lstrip("/")
+    base = _resolve_workspace_path(directory or ".")
+    return _collapse_double_workspace_segment((base / fn).resolve())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WorkspaceFileWriterTool / WorkspaceFileReadTool
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _WorkspaceWriterInput(BaseModel):
+    filename: str = Field(description="文件名，可含子目录片段")
+    directory: str | None = Field(
+        default="./",
+        description=(
+            "目标目录：绝对路径，或相对本课 workspace 根的路径（如 design/、frontend/）。"
+            "不要写 workspace/design（cwd 已是 workspace，会叠成 workspace/workspace）。"
+            "不要写无 / 开头的 Users/... 。"
+        ),
+    )
+    overwrite: str | bool = False
+    content: str = Field(description="文件全文")
+
+
+class WorkspaceFileWriterTool(BaseTool):
+    name: str = "File Writer Tool"
+    description: str = (
+        "将内容写入指定目录下的文件。"
+        "directory 用 design、mock、tests 等（相对 workspace 根），或绝对路径；"
+        "不要用 workspace/design；不要用无 / 开头的 Users/... 。"
+    )
+    args_schema: Type[BaseModel] = _WorkspaceWriterInput
+
+    def _run(
+        self,
+        filename: str,
+        directory: str | None = "./",
+        overwrite: str | bool = False,
+        content: str = "",
+    ) -> str:
+        try:
+            filepath = _resolve_workspace_filepath(directory, filename)
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            overwrite_b = strtobool(overwrite) if not isinstance(overwrite, bool) else overwrite
+            if filepath.exists() and not overwrite_b:
+                return f"File {filepath} already exists and overwrite option was not passed."
+            mode = "w" if overwrite_b else "x"
+            with open(filepath, mode, encoding="utf-8") as f:
+                f.write(content)
+            return f"Content successfully written to {filepath}"
+        except FileExistsError:
+            return f"File {filepath} already exists and overwrite option was not passed."
+        except Exception as e:
+            return f"An error occurred while writing to the file: {e!s}"
+
+
+class WorkspaceFileReadTool(FileReadTool):
+    """读文件前做与 Writer 一致的路径解析，避免 workspace/workspace 与 Users/ 误路径。"""
+
+    def _run(
+        self,
+        file_path: str | None = None,
+        start_line: int | None = 1,
+        line_count: int | None = None,
+    ) -> str:
+        fp = file_path or self.file_path
+        if fp is None:
+            return "Error: No file path provided. Please provide a file path either in the constructor or as an argument."
+        resolved = str(_resolve_workspace_path(fp))
+        return super()._run(
+            file_path=resolved, start_line=start_line, line_count=line_count
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TOOL_REGISTRY：预定义工具池
 # 工具池在代码中预定义；哪个子 Agent 用哪些，由主 Agent 在 spawn 时传 tool_names 决定
 # ─────────────────────────────────────────────────────────────────────────────
 
 TOOL_REGISTRY: dict[str, Any] = {
-    "FileReadTool":   FileReadTool(),
-    "FileWriterTool": FileWriterTool(),
+    "FileReadTool":   WorkspaceFileReadTool(),
+    "FileWriterTool": WorkspaceFileWriterTool(),
     "BashTool":       BashTool(),
 }
 
@@ -126,7 +257,7 @@ def _run_one_sub_crew(
         goal=goal,
         backstory=context,
         tools=tools,
-        llm=_llm(),
+        llm=_llm_for_sub_agent(role),
         verbose=True,
     )
     task_obj = Task(
@@ -271,18 +402,23 @@ def build_orchestrator() -> tuple[Agent, Task]:
     orchestrator = Agent(
         role="Software Development Orchestrator",
         goal=(
-            "接收软件需求文档，完成架构和接口设计，协调专职子 Agent 分模块实现，"
-            "验收代码质量，修复问题，输出完整可交付的项目。"
+            "接收软件需求文档，按 SOP **一次性连续跑完**各阶段，协调子 Agent 完成设计、实现、测试与交付；"
+            "不中断、不向用户提问；遇失败时**先分析再派单**，避免无差别重复 spawn。"
+            "你只做拆解、派单、验收与策略性重试，不执笔任何文档或代码。"
         ),
         backstory=(
             "你是一名有 10 年全栈经验的技术负责人，擅长把模糊需求拆解成清晰可执行的子任务。\n"
             "你的工作方式：\n"
-            "1. 架构和接口设计由你亲自完成——这是全局一致性的保障\n"
-            "2. 具体实现任务交给专职子 Agent——你负责指派和验收，不自己写代码\n"
-            "3. 给子 Agent 派任务时，总是显式传递它需要的所有信息，"
+            "1. 架构/接口/代码/报告一律由子 Agent 产出——你只读需求、spawn、用 FileReadTool 验收\n"
+            "2. 给子 Agent 派任务时，总是显式传递它需要的全部信息，"
             "绝不假设它能'感知'你做过什么\n"
-            "4. 独立的任务用并发子 Agent；有依赖关系的严格串行\n"
-            "5. 始终按照下方 SOP 流程推进，不跳过任何阶段\n\n"
+            "3. 独立的任务用并发子 Agent；有依赖关系的严格串行\n"
+            "4. 始终按照下方 SOP 流程推进，不跳过任何阶段\n"
+            "5. **一次跑完全程**：不向用户提问或求确认；遇阻按 SOP「失败处理」分析后再 spawn\n"
+            "6. **失败时禁止无脑重试**：读完 review/test 报告后，先自行分类（环境/导入/测试写法/业务逻辑），"
+            "写出简短根因假设与「下一步验证或修改建议」，再 spawn Debugger/QA；"
+            "同一失败模式若已重试仍相同，必须**换策略**（换任务描述、补充上下文、收窄范围），"
+            "不得原样复制上一轮的 spawn 参数\n\n"
             "你的工具：\n"
             "- spawn_sub_agent：开一个子 Agent 执行单个任务（串行）\n"
             "- spawn_sub_agents_parallel：同时开多个互相独立的子 Agent（并发）\n"
@@ -291,18 +427,22 @@ def build_orchestrator() -> tuple[Agent, Task]:
             f"{sop_content}"
         ),
         tools=[SpawnSubAgentTool(), SpawnParallelTool(), FileReadTool()],
-        llm=_llm(),
+        llm=_llm("qwen3.6-max-preview"),
         verbose=True,
     )
 
     main_task = Task(
         description=(
-            f"读取需求文档 {REQUIREMENTS_FILE}，按照 SOP 完成完整交付：\n\n"
-            "1. 完成架构设计（workspace/design/architecture.md）和接口规范（workspace/design/api_spec.md）——你自己写\n"
-            "2. 按 SOP 各阶段协调子 Agent：mock/单测 → 前后端开发 → 代码审查+测试 → 修复循环\n"
-            "3. 输出 workspace/delivery_report.md（含文件路径引用，不复制代码内容）\n\n"
+            f"读取需求文档 {REQUIREMENTS_FILE}，按照 SOP 完成完整交付（你只协调，不执笔）：\n\n"
+            "1. 阶段 1：spawn 子 Agent 产出 A（architecture.md）与 B（api_spec.md），你用 FileReadTool 分别验收\n"
+            "2. 阶段 2～5：按 SOP 协调子 Agent：mock/单测 → 前后端开发 → 代码审查+测试 → 修复循环\n"
+            "3. 阶段 6：spawn 子 Agent 写 workspace/delivery_report.md（仅路径引用，不复制代码），你再读取确认\n\n"
             "关键约束：\n"
-            "- spawn 子 Agent 时必须显式传递完整上下文（文件内容，不只是路径）\n"
+            "- **一次性做完整个 SOP**，中间不要停、不要向用户提问或等待确认；有问题按 SOP 自己解决\n"
+            "- **验收或测试失败后**：先读报告与相关文件，做根因分类并写出「解决建议」再 spawn；"
+            "禁止用与上一轮完全相同的 task/context 重复 spawn Debugger/QA\n"
+            "- spawn 子 Agent 时必须显式传递完整上下文（文件内容，不只是路径）；"
+            "修复类 spawn 须在 context 中包含：失败摘要、你的分析、建议子 Agent 采取的具体步骤\n"
             f"- 所有产出文件放在 {WORKSPACE_DIR}/ 下\n"
             "- 子 Agent 完成后必须用 FileReadTool 读取输出文件确认内容\n"
         ),
@@ -322,6 +462,9 @@ def build_orchestrator() -> tuple[Agent, Task]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run() -> Any:
+    # 避免 CrewAI 首次运行后弹出「是否查看 execution traces」阻塞或打断自动化流程
+    os.environ.setdefault("CREWAI_TESTING", "true")
+
     print("=" * 60)
     print("第23课·Orchestrator范式 演示")
     print(f"需求文档 : {REQUIREMENTS_FILE}")

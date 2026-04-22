@@ -1,0 +1,51 @@
+# 第28课·数字员工的自我进化 — 集成测试编排
+#
+# 服务说明：
+#   test              - 纯单元测试（无网络依赖，无 API Key 需求，CI 常规运行）
+#   test-integration  - 真实 LLM 集成测试（需要 ALIYUN_API_KEY）
+#
+# 用法：
+#   # 仅单元测试（快速，无 API Key 需求）
+#   docker compose run --rm test
+#
+#   # 完整集成测试（需要 .env 文件或环境变量）
+#   ALIYUN_API_KEY=your_key docker compose run --rm test-integration
+#
+#   # 带覆盖率报告
+#   docker compose run --rm test pytest m4l28/test_m4l28.py --cov=m4l28 --cov-report=term-missing
+
+version: "3.9"
+
+x-base: &base
+  build:
+    context: ..                    # crewai_mas_demo/ 目录
+    dockerfile: m4l28/Dockerfile
+  volumes:
+    - ..:/app                      # 挂载源码，方便本地调试时实时修改
+  working_dir: /app
+
+services:
+  # ── 单元测试（默认 CI 运行，不需要 ALIYUN_API_KEY）────────────────────────
+  test:
+    <<: *base
+    command: >
+      python3 -m pytest m4l28/test_m4l28.py
+      -v --tb=short
+      --cov=m4l28 --cov-report=term-missing
+      -p no:warnings
+    environment:
+      PYTHONPATH: /app
+
+  # ── 真实 LLM 集成测试（需要 ALIYUN_API_KEY）──────────────────────────────
+  test-integration:
+    <<: *base
+    command: >
+      python3 -m pytest
+      m4l28/test_m4l28.py
+      m4l28/test_m4l28_integration.py
+      -v --tb=short -m "integration or not integration"
+      --cov=m4l28 --cov-report=term-missing
+      -p no:warnings
+    environment:
+      PYTHONPATH: /app
+      ALIYUN_API_KEY: ${ALIYUN_API_KEY}

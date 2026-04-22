@@ -170,8 +170,8 @@ _SUMMARY_PROMPT = """\
 
 
 def _summarize_chunk(messages: list[dict]) -> str:
-    # 使用与主 Agent 相同的 qwen3-max，避免环境中找不到 qwen3-turbo 导致压缩失败
-    summary_llm = LLM(model="qwen3-max")
+    # 使用与主 Agent 相同的 qwen3.6-max-preview，避免环境中找不到 qwen3-turbo 导致压缩失败
+    summary_llm = LLM(model="qwen3.6-max-preview")
     history = "\n".join(
         f"{m.get('role', '')}: {str(m.get('content', ''))[:300]}" for m in messages
     )
@@ -239,7 +239,7 @@ class XiaoPawCrew:
             goal      = "帮助晓寒高效完成各类任务，严谨、结果导向",
             backstory = build_bootstrap_prompt(WORKSPACE_DIR),
             llm       = aliyun_llm.AliyunLLM(
-                model   = "qwen3-max",
+                model   = "qwen3.6-max-preview",
                 api_key = os.getenv("QWEN_API_KEY"),
                 region  = "cn",
             ),

@@ -24,6 +24,7 @@ AddImageToolLocal：本地图片加载工具
 """
 import base64
 import io
+import logging
 from typing import Any
 from pathlib import Path
 
@@ -31,12 +32,17 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 from PIL import Image
 
+logger = logging.getLogger(__name__)
+
+
 class AddImageToolLocalSchema(BaseModel):
     """与 CrewAI AddImageTool 的 schema 保持一致。"""
     image_url: str = Field(
         ...,
         description="The URL or path of the image to add",
     )
+
+
 def _compress_image(raw: bytes) -> bytes:
     """
     压缩图片分辨率在4K(3840x2160)以下，并保持图片原始比例
@@ -47,27 +53,24 @@ def _compress_image(raw: bytes) -> bytes:
             image.thumbnail((3840, 2160))
         return image.tobytes()
     except Exception as e:
-        print(f"AddImageToolLocal: error={e}")
+        logger.warning("AddImageToolLocal: compress failed error=%s", e)
         return None
 
 
 def _local_path_to_base64_data_and_compress_url(image_url: str) -> str | None:
     """
-    若 image_url 为本地文件路径，则读取并转为 data URL；否则返回 错误信息: 图片文件不存在: {image_url}。
+    若 image_url 为本地文件路径，则读取并转为 data URL；否则返回错误信息。
     """
-    print(f"AddImageToolLocal: image_url={image_url}")
+    logger.debug("AddImageToolLocal: image_url=%s", image_url)
     path = Path(image_url).expanduser().resolve()
-    print(f"AddImageToolLocal: path={path}")
+    logger.debug("AddImageToolLocal: resolved path=%s", path)
     if not path.is_file():
-        print(f"AddImageToolLocal: path is not a file")
+        logger.warning("AddImageToolLocal: path is not a file: %s", path)
         return f"图片文件不存在: {image_url}"
     raw = path.read_bytes()
-    print(f"AddImageToolLocal: raw={len(raw)}")
-    # 压缩图片
-    #raw = _compress_image(raw)
-    print(f"AddImageToolLocal: raw={len(raw)}")
+    logger.debug("AddImageToolLocal: raw bytes=%d", len(raw))
     b64 = base64.b64encode(raw).decode("utf-8")
-    print(f"AddImageToolLocal: b64={len(b64)}")
+    logger.debug("AddImageToolLocal: b64 length=%d", len(b64))
     suffix = path.suffix.lower()
     mime = "image/jpeg"
     if suffix == ".png":

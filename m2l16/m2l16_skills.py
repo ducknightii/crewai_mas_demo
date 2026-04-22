@@ -63,7 +63,7 @@ def build_main_crew() -> Crew:
         行为边界：
         你会尽量使用skill完成任务，而不是自行编造结果。
         """,
-        llm=AliyunLLM(model="qwen3-max", region="cn", temperature=0.3),
+        llm=AliyunLLM(model="qwen3.6-max-preview", region="cn", temperature=0.3),
         tools=[skill_loader, IntermediateTool()],
         verbose=True,
     )
