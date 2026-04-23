@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+workspace/demo_agent/audit.log
+workspace/demo_agent/security_audit.jsonl

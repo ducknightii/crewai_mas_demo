@@ -1,0 +1,4 @@
+research_task:
+  description: "搜索关于 {topic} 的最新进展，列出 3 个关键要点，每个要点用一句话总结。"
+  expected_output: "包含 3 个关键要点的简洁列表，每点一句话。"
+  agent: research_analyst
