@@ -207,6 +207,57 @@ class CrewObservabilityAdapter:
 
         return callback
 
+    def make_sub_crew_step_callback(self) -> Callable:
+        """Sub-Crew 专用 step_callback。
+
+        设计要点：
+        - 独立 sub_turn 计数，不污染主 Crew 的 _turn_count
+        - 不重置 _current_turn_has_llm（主 Crew 仍需要它）
+        - 从全局 @before_llm_call 已写入的 _last_agent_role / _pending_input_tokens 读值
+        - 用 registry.dispatch（非 gate），避免 Sub-Crew 触发主 Crew 的 pending_deny 机制
+        """
+        registry = self._registry
+        sid = self._session_id
+        sub_turn = [0]
+
+        def callback(step):
+            from crewai.agents.parser import AgentAction, AgentFinish
+
+            sub_turn[0] += 1
+            step_output = tool_name = llm_response = ""
+
+            if isinstance(step, AgentAction):
+                tool_name    = getattr(step, "tool",   "")
+                step_output  = _truncate(str(getattr(step, "result", "") or ""))
+                llm_response = _truncate(str(getattr(step, "text",   "") or ""))
+            elif isinstance(step, AgentFinish):
+                step_output  = _truncate(str(getattr(step, "output", "")))
+                llm_response = _truncate(str(getattr(step, "text",   "") or ""))
+
+            registry.dispatch(
+                EventType.AFTER_TURN,
+                HookContext(
+                    event_type=EventType.AFTER_TURN,
+                    session_id=sid,
+                    turn_number=sub_turn[0],
+                    agent_id=self._last_agent_role,
+                    tool_name=tool_name,
+                    input_tokens=self._pending_input_tokens,
+                    output_tokens=_estimate_tokens(step_output),
+                    metadata={
+                        "output": step_output,
+                        "llm_response": llm_response,
+                        "prompt_preview": self._last_prompt_preview,
+                        "sub_crew": True,
+                    },
+                ),
+            )
+            # 只清 token 状态，不动 _current_turn_has_llm（主 Crew 仍需要它）
+            self._pending_input_tokens = 0
+            self._last_prompt_preview  = ""
+
+        return callback
+
     def make_task_callback(self) -> Callable:
         registry = self._registry
         sid = self._session_id

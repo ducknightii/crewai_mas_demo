@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -160,7 +161,7 @@ def demo_runtime(isolated_audit, langfuse_spy):
         global_dir=_DIR / "shared_hooks",
         workspace_dir=_DIR / "workspace" / "demo_agent",
     )
-    adapter = CrewObservabilityAdapter(registry, session_id="test_demo_flow")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"test_demo_flow-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = demo._build_llm()
@@ -248,7 +249,7 @@ def test_normal_runs_bootstrap_and_skill_loader(demo_runtime, isolated_output, m
         args_schema: type[BaseModel] = _SkillInput
         _skill_registry: dict = PrivateAttr(default_factory=dict)
 
-        def __init__(self, skills_dir="", sandbox_mcp_url="", sandbox_mount_desc=""):
+        def __init__(self, skills_dir="", sandbox_mcp_url="", sandbox_mount_desc="", **kwargs):
             super().__init__()
             captured["built_with"] = {
                 "skills_dir": skills_dir,

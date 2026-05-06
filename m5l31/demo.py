@@ -101,6 +101,8 @@ def main():
         skills_dir=str(SKILLS_DIR),
         sandbox_mcp_url=SANDBOX_MCP_URL,
         sandbox_mount_desc=SANDBOX_MOUNT_DESC,
+        step_callback=adapter.make_sub_crew_step_callback(),   # 💡 Sub-Crew 可观测性
+        task_callback=adapter.make_task_callback(),            # 💡 Sub-Crew task 完成追踪
     )
 
     model_name = os.environ.get("AGENT_MODEL", "qwen-plus")
