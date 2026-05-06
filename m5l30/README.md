@@ -21,18 +21,28 @@ cd langfuse
 echo "ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 echo "SALT=$(openssl rand -hex 32)" >> .env
 echo "NEXTAUTH_SECRET=$(openssl rand -hex 32)" >> .env
+echo "NEXTAUTH_URL=http://localhost:3000" >> .env
 echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> .env
 echo "REDIS_AUTH=$(openssl rand -hex 16)" >> .env
 
 # 启动所有容器（Web + Worker + Postgres + Redis + ClickHouse + MinIO）
 docker compose up -d
 
-# 等待 2-3 分钟，确认健康状态
+# ⚠️ ClickHouse 冷启动慢，请等待 5-8 分钟再检查健康状态
+# 如果 langfuse-web-1 一直在重启，通常是 ClickHouse 还没就绪，继续等待即可
+# 可以用以下命令查看各容器状态：
+docker compose ps
+docker compose logs langfuse-web-1 --tail=20      # 查看 web 容器报错
+docker compose logs langfuse-clickhouse-1 --tail=10  # 确认 ClickHouse 已就绪
+
+# 确认健康状态（ClickHouse 就绪后才会返回 OK）
 curl http://localhost:3000/api/public/health
 # 预期输出：{"status":"OK","version":"3.x.x"}
 ```
 
 启动后访问 http://localhost:3000，首次登录需注册账号（自托管模式，注册即管理员）。
+
+> **常见问题**：`langfuse-web-1` 反复重启 → 99% 是 ClickHouse 尚未就绪，等待即可，不需要重建容器。
 
 ### Step 2：创建 Project 和 API Key
 
@@ -78,9 +88,16 @@ AGENT_MODEL=qwen-plus
 LANGFUSE_PUBLIC_KEY=pk-lf-course-demo           # 替换为你的 Public Key
 LANGFUSE_SECRET_KEY=sk-lf-course-demo           # 替换为你的 Secret Key
 LANGFUSE_BASE_URL=http://localhost:3000          # ⚠️ 必须设置，否则 SDK 会发到 cloud.langfuse.com
+
+# === CrewAI 遥测（必须关闭）===
+CREWAI_DISABLE_TELEMETRY=true                   # ⚠️ 不设置会在 Langfuse 产生两条相同 trace
 ```
 
-**关键注意**：`LANGFUSE_BASE_URL` 必须显式设置为 `http://localhost:3000`。如果不设置，Langfuse Python SDK 默认连接 `https://cloud.langfuse.com`，trace 数据不会出现在你的本地实例中。
+**关键注意**：
+
+1. `LANGFUSE_BASE_URL` 必须显式设置为 `http://localhost:3000`。如果不设置，Langfuse Python SDK 默认连接 `https://cloud.langfuse.com`，trace 数据不会出现在你的本地实例中。
+
+2. `CREWAI_DISABLE_TELEMETRY=true` 必须设置。CrewAI 启动时会将自己的 OTel TracerProvider 注册为全局 provider，导致 Langfuse SDK 只能复用该 provider 而无法独立接管，最终使同一次 Demo 在 Langfuse 中产生两条内容相同的 trace 记录。
 
 ### Step 5：验证连接
 
@@ -100,12 +117,12 @@ m5l30/
 ├── hook_framework/                     # Hook 框架核心
 │   ├── __init__.py                     # 导出公共接口
 │   ├── registry.py                     # F1-F2: EventType(5+2) + HookContext + HookRegistry
-│   ├── loader.py                       # F3-F4: hooks.yaml 解析 + importlib 两层自动加载
+│   ├── loader.py                       # F3-F4: hooks.yaml 解析 + importlib 两层自动加载 + 模块缓存
 │   └── crew_adapter.py                 # F5: CrewAI 4种机制 → HookRegistry 7种事件
 ├── shared_hooks/                       # 全局 Hook（所有 Agent 共享）
 │   ├── hooks.yaml                      # 全局配置：事件 → handler 映射
 │   ├── structured_log.py               # F6: 结构化 JSON 日志（stderr）
-│   └── langfuse_trace.py              # F7: Langfuse 追踪（trace + generation + span）
+│   └── langfuse_trace.py              # F7: Langfuse 追踪（树状 trace + span 栈嵌套）
 ├── workspace/                          # 演示 Workspace（25 课 Bootstrap 架构）
 │   └── demo_agent/
 │       ├── soul.md                     # 💡 Agent 身份
@@ -252,16 +269,20 @@ python3 demo.py "为一个短链接服务产出技术设计文档"
 📝 Audit log: workspace/demo_agent/audit.log
 ```
 
-### Langfuse Trace（7 个 Observations）
+### Langfuse Trace（树状结构）
 
-| Type | Name | 说明 |
-|------|------|------|
-| TOOL | tool-sandbox_file_operations | Sub-Crew: 沙盒文件操作（list/write/read） |
-| TOOL | tool-skill_loader | 主 Agent: 调用 sop_design（task 型） |
-| GENERATION | turn-1 | 主 Agent: LLM 最终回复 |
-| SPAN | task-complete | 主 Agent: 任务完成 |
+```
+session-{id}                              ← CHAIN（root span）
+├── tool-skill_loader                     ← TOOL（主 Agent 调用 Skill）
+│   ├── tool-sandbox_file_operations      ← TOOL（Sub-Crew 沙盒操作，嵌套在 skill_loader 下）
+│   ├── tool-sandbox_str_replace_editor   ← TOOL
+│   ├── tool-sandbox_execute_code         ← TOOL
+│   └── tool-sandbox_execute_bash         ← TOOL
+├── turn-1                                ← GENERATION（始终挂在 root 下）
+└── task-complete                         ← SPAN（始终挂在 root 下）
+```
 
-> 💡 全局 Hook（`@before_tool_call` / `@after_tool_call`）自动捕获 Sub-Crew 的沙盒工具调用，无需额外配置。
+> 💡 span 栈机制：`before_tool_handler` 将 span 压栈，`after_tool_handler` 出栈。Sub-Crew 的沙盒工具调用以栈顶 span（即 `skill_loader`）为父节点，自动形成树状嵌套。模块缓存确保 langfuse_trace 全局状态在所有 handler 间共享。
 
 ---
 
@@ -390,12 +411,15 @@ hooks:
 |---------|--------|
 | `_ensure_client()` | 懒初始化——首次事件触发时才创建 Langfuse 客户端 |
 | `_ensure_trace()` | `create_trace_id(seed=session_id)` 保证幂等性——同一 session 同一 trace |
-| `before_tool_handler()` | 开启 TOOL span → 存入 `_pending_spans` dict |
-| `after_tool_handler()` | 从 `_pending_spans` 取出 span → 写入 output → `end()` |
-| `after_turn_handler()` | 创建 GENERATION observation：prompt 摘要 + LLM 回复 |
-| `flush_and_close()` | 关闭孤儿 span + 结束根 span + flush 客户端 |
+| `_get_otel_span_id()` | 从 OTel span 对象中提取 span ID，用于构建父子关系 |
+| `_get_parent_context()` | 栈顶 span 为父；栈空则 root span 为父 |
+| `_get_root_context()` | 始终以 root span 为父（用于 GENERATION / TASK_COMPLETE） |
+| `before_tool_handler()` | 开启 TOOL span → 存入 `_pending_spans` + 压入 `_span_stack` |
+| `after_tool_handler()` | 从 `_pending_spans` 取出 span → 写入 output → `end()` → 出栈 |
+| `after_turn_handler()` | 创建 GENERATION，始终挂在 root span 下 |
+| `flush_and_close()` | 清空 span 栈 + 关闭孤儿 span + 结束根 span + flush 客户端 |
 
-**理解要点**：TOOL span 用"开启-关闭"模式（`_pending_spans` dict）捕获真实执行耗时。GENERATION 在 `AFTER_TURN` 一次性创建（因为 `@after_llm_call` 不能用——会干扰 CrewAI 的 function calling）。
+**理解要点**：span 栈是实现树状追踪的核心。`before_tool_handler` 将新 span 压栈，Sub-Crew 的工具调用以栈顶为父节点自动嵌套。`after_tool_handler` 出栈恢复上层。GENERATION 和 TASK_COMPLETE 始终用 `_get_root_context()` 挂在根 span 下，避免被嵌套到工具 span 内。
 
 ---
 
@@ -408,10 +432,11 @@ hooks:
 | 重点区域 | 看什么 |
 |---------|--------|
 | `load_from_directory()` | 解析 hooks.yaml → `importlib.util.spec_from_file_location` 动态导入 |
+| `_module_cache` | 模块缓存——同一模块只加载一次，确保全局状态共享 |
 | 路径穿越防护 | `module_path.is_relative_to(hooks_dir.resolve())` 阻止 `../../` 攻击 |
 | `load_two_layers()` | 先加载 `global_dir` → 再加载 `workspace_dir/hooks/`，追加不覆盖 |
 
-**理解要点**：两层加载的意义——全局层（结构化日志 + Langfuse）是每个 Agent 的基线保障，Workspace 层（审计日志）是特定 Agent 的业务定制。新建 Agent 时，全局层自动继承。
+**理解要点**：模块缓存是关键——`importlib.util.module_from_spec()` 每次都会创建新的模块实例，如果同一个 YAML 中多次引用同一模块（如 `langfuse_trace` 被多个事件引用），不缓存会导致每个 handler 持有独立的全局状态（`_span_stack`、`_pending_spans` 等），span 栈机制会失效。
 
 ---
 
