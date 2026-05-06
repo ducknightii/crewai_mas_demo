@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -251,7 +252,7 @@ def test_langfuse_trace_created(tmp_path):
     loader = HookLoader(registry)
     loader.load_two_layers(global_dir, ws_dir)
 
-    session_id = "e2e-langfuse-test"
+    session_id = f"e2e-langfuse-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     adapter = CrewObservabilityAdapter(registry, session_id=session_id)
     adapter.install_global_hooks()
 
@@ -286,22 +287,31 @@ def test_langfuse_trace_created(tmp_path):
     result = crew.kickoff()
     adapter.cleanup()
 
-    # 验证 Langfuse trace
+    # 验证 Langfuse trace（批量写入后 Langfuse 索引需要约 10-15s，用轮询等待）
     import time
-    time.sleep(5)
-
     from langfuse import Langfuse
+    from langfuse.api.commons.errors.not_found_error import NotFoundError
 
     client = Langfuse()
     trace_id = client.create_trace_id(seed=session_id)
-    trace = client.api.trace.get(trace_id)
 
+    trace = None
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            trace = client.api.trace.get(trace_id)
+            break
+        except NotFoundError:
+            time.sleep(3)
+
+    assert trace is not None, f"Langfuse trace {trace_id} not found within 30s"
     assert len(trace.observations) >= 2, (
         f"Expected ≥2 observations (tool + generation), got {len(trace.observations)}"
     )
 
     obs_types = {obs.type for obs in trace.observations}
-    assert "TOOL" in obs_types, f"Missing TOOL observation. Types: {obs_types}"
+    # langfuse_trace.py 用 span-create 记录工具调用，Langfuse API 返回 SPAN 类型
+    assert "SPAN" in obs_types, f"Missing tool SPAN observation. Types: {obs_types}"
     assert "GENERATION" in obs_types, f"Missing GENERATION observation. Types: {obs_types}"
 
     print(f"\n✅ Langfuse: trace {trace_id[:16]}... has {len(trace.observations)} observations")

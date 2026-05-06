@@ -74,15 +74,22 @@ def _reset_langfuse_globals():
     """langfuse_trace 模块级 globals 跨测试复用会串 trace，必须每次清零。"""
     from shared_hooks import langfuse_trace as lt
 
-    for attr in ("_client", "_trace_id", "_trace_context", "_root_span",
-                 "_trace_name", "_session_id", "_task_description"):
-        setattr(lt, attr, None if attr != "_task_description" else "")
-    lt._pending_spans.clear()
+    def _reset():
+        lt._client = None
+        lt._init_failed = False
+        with lt._batch_lock:
+            lt._batch_buffer.clear()
+        lt._trace_id_var.set("")
+        lt._session_id_var.set("")
+        lt._root_span_id_var.set("")
+        lt._gen_id_var.set("")
+        lt._gen_count_var.set(0)
+        lt._tool_count_var.set(0)
+        lt._span_stack_var.set(())
+
+    _reset()
     yield
-    for attr in ("_client", "_trace_id", "_trace_context", "_root_span",
-                 "_trace_name", "_session_id", "_task_description"):
-        setattr(lt, attr, None if attr != "_task_description" else "")
-    lt._pending_spans.clear()
+    _reset()
 
 
 class _SpanSpy:
@@ -111,19 +118,60 @@ class _SpanSpy:
 
 @pytest.fixture
 def langfuse_spy(_reset_langfuse_globals):
-    """Patch shared_hooks.langfuse_trace.Langfuse 捕获所有 span 内容。"""
+    """Patch langfuse.Langfuse，拦截 api.ingestion.batch() 捕获所有 span/generation 事件。
+
+    langfuse_trace.py 使用批量注入 API（ingestion.batch），不再使用 start_observation。
+    本 spy 将 batch items 翻译成 {"action", "name", "as_type", "input", "output"} 格式，
+    与测试断言保持兼容。
+    """
     events: list[dict] = []
+    _id_to_name: dict[str, str] = {}
+
+    def _process_batch(batch):
+        for item in batch:
+            item_type = getattr(item, "type", "")
+            body = getattr(item, "body", None)
+            if body is None:
+                continue
+            if item_type == "span-create":
+                sid = getattr(body, "id", "")
+                name = getattr(body, "name", "") or ""
+                _id_to_name[sid] = name
+                events.append({"action": "start", "name": name,
+                               "input": getattr(body, "input", None)})
+            elif item_type == "span-update":
+                sid = getattr(body, "id", "")
+                events.append({"action": "update",
+                               "name": _id_to_name.get(sid, ""),
+                               "output": getattr(body, "output", None)})
+            elif item_type == "generation-create":
+                gid = getattr(body, "id", "")
+                name = getattr(body, "name", "") or ""
+                _id_to_name[gid] = name
+                events.append({"action": "start", "name": name, "as_type": "generation",
+                               "input": getattr(body, "input", None), "output": None})
+            elif item_type == "generation-update":
+                gid = getattr(body, "id", "")
+                events.append({"action": "update",
+                               "name": _id_to_name.get(gid, ""),
+                               "as_type": "generation",
+                               "output": getattr(body, "output", None)})
 
     def _client_factory(*args, **kwargs):
         client = MagicMock()
         client.create_trace_id = lambda seed=None: f"trace-{seed or 'x'}"
-        client.start_observation = lambda **kw: _SpanSpy(events, kw)
-        client.flush = MagicMock()
+
+        def _batch_side_effect(batch=None, **kw):
+            if batch:
+                _process_batch(batch)
+
+        client.api = MagicMock()
+        client.api.ingestion = MagicMock()
+        client.api.ingestion.batch = MagicMock(side_effect=_batch_side_effect)
         return client
 
-    # HookLoader 用 importlib 以 `hooks.global.langfuse_trace` 为名重新加载模块；
-    # 该模块的 `from langfuse import Langfuse` 绑定是在加载时解析的。
-    # 因此必须 patch 源头 `langfuse.Langfuse`，而不是 shared_hooks 里的拷贝。
+    # langfuse_trace._ensure_client() 执行 `from langfuse import Langfuse`，
+    # 必须 patch 源头 `langfuse.Langfuse` 而非 shared_hooks 内的拷贝。
     with patch("langfuse.Langfuse", side_effect=_client_factory):
         yield SimpleNamespace(events=events)
 
@@ -283,6 +331,9 @@ def test_normal_runs_bootstrap_and_skill_loader(demo_runtime, isolated_output, m
 
     # --- 验收：产出文件存在 ---
     assert design_doc.exists(), "run_normal 应通过 SkillLoader 产出 design_doc.md"
+
+    # cleanup 触发 SESSION_END → flush_and_close() → _flush_batch()，spy 才能拦截 batch 事件
+    rt.adapter.cleanup()
 
     # --- 验收：Langfuse 至少记录 session / turn 级 span ---
     started_names = [e.get("name", "") for e in rt.langfuse.events if e["action"] == "start"]
