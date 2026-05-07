@@ -451,15 +451,61 @@ class SkillLoaderTool(BaseTool):
         """
         💡 核心点：用 ThreadPoolExecutor 在新线程中运行独立 event loop，
         规避主线程已有 event loop 时 asyncio.run() 报
-        'cannot run nested event loop' 的问题
+        'cannot run nested event loop' 的问题。
+
+        💡 ContextVar 传播：copy_context() + ctx.run() 将主线程的 ContextVar
+        快照（含 Langfuse _trace_id_var 等）传入子线程，Sub-Crew spans
+        能正确挂在同一 trace 下。
         """
         if skill_name not in self._skill_registry:
             return f"错误：未找到 Skill '{skill_name}'，可用：{list(self._skill_registry.keys())}"
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                asyncio.run,
-                self._execute_skill_async(skill_name, task_context),
+        import contextvars
+
+        # 在 spawn 前读取当前 Langfuse parent span（graceful if not available）
+        # shared_hooks.langfuse_trace 仅在 m5l31+ 运行时 sys.path 中存在，
+        # 早期课程无此模块时静默降级。
+        try:
+            from shared_hooks.langfuse_trace import (
+                _get_langfuse_parent_span_id,
+                _reset_subcrew_state,
+                subcrew_cleanup,
             )
-            return future.result()
+            parent_span_id = _get_langfuse_parent_span_id()
+            _langfuse_available = True
+        except ImportError:
+            parent_span_id = ""
+            _langfuse_available = False
+
+        ctx = contextvars.copy_context()
+
+        def _run_in_new_loop():
+            if _langfuse_available:
+                _reset_subcrew_state(parent_span_id)
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(
+                    self._execute_skill_async(skill_name, task_context)
+                )
+            finally:
+                if _langfuse_available:
+                    subcrew_cleanup()
+                pending = asyncio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    try:
+                        loop.run_until_complete(
+                            asyncio.wait_for(
+                                asyncio.gather(*pending, return_exceptions=True),
+                                timeout=10.0,
+                            )
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(ctx.run, _run_in_new_loop)
+            return future.result(timeout=300)
 

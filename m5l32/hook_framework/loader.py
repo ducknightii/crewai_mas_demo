@@ -17,6 +17,7 @@ class HookLoader:
     def __init__(self, registry: HookRegistry):
         self._registry = registry
         self._strategies: dict[str, object] = {}
+        self._module_cache: dict[str, object] = {}
 
     def _load_module(self, hooks_dir: Path, module_name: str, layer_name: str):
         module_path = (hooks_dir / f"{module_name}.py").resolve()
@@ -29,9 +30,12 @@ class HookLoader:
                 f"module not found: {module_path}"
             )
         fq_name = f"hooks.{layer_name}.{module_name}"
+        if fq_name in self._module_cache:
+            return self._module_cache[fq_name]
         spec = importlib.util.spec_from_file_location(fq_name, module_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        self._module_cache[fq_name] = module
         return module
 
     def load_from_directory(self, hooks_dir: Path, layer_name: str = ""):

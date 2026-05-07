@@ -3,7 +3,7 @@ services:
   aio-sandbox:
     image: ghcr.io/agent-infra/sandbox:latest
     ports:
-      - "8030:8080"
+      - "8031:8080"
     volumes:
       - ./workspace/demo_agent/skills:/mnt/skills:ro
       - ./workspace/demo_agent/output:/workspace/output:rw

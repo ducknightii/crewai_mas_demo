@@ -7,5 +7,6 @@ services:
     volumes:
       - ./workspace/demo_agent/skills:/mnt/skills:ro
       - ./workspace/demo_agent/output:/workspace/output:rw
+      - ./func_metadata_patched.py:/opt/python3.12/lib/python3.12/site-packages/mcp/server/fastmcp/utilities/func_metadata.py:ro
     security_opt:
       - seccomp:unconfined

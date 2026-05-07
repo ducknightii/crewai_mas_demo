@@ -13,6 +13,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -138,7 +139,7 @@ def test_s1_normal_execution_three_layers(tmp_path, monkeypatch):
     """Agent 使用 knowledge_search（allow），三层叠加正常工作。"""
     registry, sec, rel, audit_file = _setup_full_stack(tmp_path, monkeypatch)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="s1_normal")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"s1_normal-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = _make_llm()
@@ -195,7 +196,7 @@ def test_s2_permission_deny_privilege_escalation(tmp_path, monkeypatch):
     """Agent 拿到 shell_executor 工具但被 security.yaml DENY。"""
     registry, sec, rel, audit_file = _setup_full_stack(tmp_path, monkeypatch)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="s2_privilege")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"s2_privilege-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = _make_llm()
@@ -252,7 +253,7 @@ def test_s3_injection_path_traversal(tmp_path, monkeypatch):
     """Task 包含 ../../etc/passwd，sandbox_guard 拦截。"""
     registry, sec, rel, audit_file = _setup_full_stack(tmp_path, monkeypatch)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="s3_inject")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"s3_inject-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = _make_llm()
@@ -309,7 +310,7 @@ def test_s4_credential_injection(tmp_path, monkeypatch):
 
     registry, sec, rel, audit_file = _setup_full_stack(tmp_path, monkeypatch)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="s4_cred")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"s4_cred-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     raw_tool = SecureApiTool()
@@ -363,7 +364,7 @@ def test_s5_three_layers_with_budget(tmp_path, monkeypatch):
     """安全检查通过后，成本围栏仍然生效。"""
     registry, sec, rel, audit_file = _setup_full_stack(tmp_path, monkeypatch, budget=0.0001)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="s5_budget")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"s5_budget-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = _make_llm()

@@ -6,6 +6,7 @@
 
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,7 @@ def test_e2e_normal_execution(tmp_path, monkeypatch):
     """正常执行：无 deny，metrics 有数据。"""
     registry, strategies = _load_strategies(tmp_path, monkeypatch, budget=10.0)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="test_normal")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"test_normal-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     crew = _make_crew(KnowledgeSearchTool(), registry, adapter)
@@ -125,7 +126,7 @@ def test_e2e_loop_detection(tmp_path, monkeypatch):
     """循环检测：LoopingTool 导致重复状态 → GuardrailDeny 或 metrics 记录循环。"""
     registry, strategies = _load_strategies(tmp_path, monkeypatch, budget=10.0, loop_threshold=2)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="test_loop")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"test_loop-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     llm = _make_llm()
@@ -169,7 +170,7 @@ def test_e2e_cost_guard(tmp_path, monkeypatch):
     """成本围栏：极低预算 → GuardrailDeny。"""
     registry, strategies = _load_strategies(tmp_path, monkeypatch, budget=0.0001)
 
-    adapter = CrewObservabilityAdapter(registry, session_id="test_cost")
+    adapter = CrewObservabilityAdapter(registry, session_id=f"test_cost-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}")
     adapter.install_global_hooks()
 
     crew = _make_crew(KnowledgeSearchTool(), registry, adapter)

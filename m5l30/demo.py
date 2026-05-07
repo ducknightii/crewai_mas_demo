@@ -46,7 +46,7 @@ WORKSPACE_DIR = _M5L30_DIR / "workspace" / "demo_agent"
 SKILLS_DIR = WORKSPACE_DIR / "skills"
 OUTPUT_DIR = WORKSPACE_DIR / "output"
 
-SANDBOX_MCP_URL = "http://localhost:8030/mcp"
+SANDBOX_MCP_URL = "http://localhost:8031/mcp"
 SANDBOX_MOUNT_DESC = (
     "1. 所有操作必须在沙盒中执行，不得操作本地文件系统。\n"
     "   已挂载目录：\n"

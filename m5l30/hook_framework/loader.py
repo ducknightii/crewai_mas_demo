@@ -12,6 +12,7 @@ from .registry import EventType, HookRegistry
 class HookLoader:
     def __init__(self, registry: HookRegistry):
         self._registry = registry
+        self._module_cache: dict[str, object] = {}
 
     def load_from_directory(self, hooks_dir: Path, layer_name: str = ""):
         yaml_path = hooks_dir / "hooks.yaml"
@@ -39,9 +40,13 @@ class HookLoader:
                     )
                     continue
                 fq_name = f"hooks.{layer_name}.{module_name}"
-                spec = importlib.util.spec_from_file_location(fq_name, module_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                if fq_name in self._module_cache:
+                    module = self._module_cache[fq_name]
+                else:
+                    spec = importlib.util.spec_from_file_location(fq_name, module_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    self._module_cache[fq_name] = module
                 handler_fn = getattr(module, func_name, None)
                 if handler_fn is None:
                     print(

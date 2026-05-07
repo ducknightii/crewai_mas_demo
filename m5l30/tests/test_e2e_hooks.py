@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -260,7 +261,7 @@ def test_langfuse_trace_created(tmp_path):
     loader = HookLoader(registry)
     loader.load_two_layers(global_dir, ws_dir)
 
-    session_id = "e2e-langfuse-test"
+    session_id = f"e2e-langfuse-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     adapter = CrewObservabilityAdapter(registry, session_id=session_id)
     adapter.install_global_hooks()
 
@@ -295,24 +296,42 @@ def test_langfuse_trace_created(tmp_path):
     result = crew.kickoff()
     adapter.cleanup()
 
-    # 验证 Langfuse trace
+    # 验证 Langfuse trace (使用 REST API + 重试，兼容 batch 注入异步性)
     import time
-    time.sleep(5)
+    import hashlib
+    import requests
 
-    from langfuse import Langfuse
+    trace_id = hashlib.sha256(session_id.encode()).digest()[:16].hex()
+    base_url = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000")
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    sk = os.environ.get("LANGFUSE_SECRET_KEY", "")
 
-    client = Langfuse()
-    trace_id = client.create_trace_id(seed=session_id)
-    trace = client.api.trace.get(trace_id)
+    # 重试查询，最多等待 15 秒
+    observations = []
+    for attempt in range(15):
+        time.sleep(1)
+        r = requests.get(
+            f"{base_url}/api/public/observations",
+            auth=(pk, sk),
+            params={"traceId": trace_id, "limit": 50}
+        )
+        if r.ok:
+            observations = r.json().get("data", [])
+            if len(observations) >= 2:
+                break
 
-    assert len(trace.observations) >= 2, (
-        f"Expected ≥2 observations (tool + generation), got {len(trace.observations)}"
+    assert len(observations) >= 2, (
+        f"Expected ≥2 observations (tool + generation), got {len(observations)}"
     )
 
-    obs_types = {obs.type for obs in trace.observations}
-    assert "TOOL" in obs_types, f"Missing TOOL observation. Types: {obs_types}"
+    obs_types = {o.get("type") for o in observations}
+    # batch API 使用 SPAN 表示工具调用（原 TOOL 类型）
+    assert "SPAN" in obs_types, f"Missing SPAN observation. Types: {obs_types}"
     assert "GENERATION" in obs_types, f"Missing GENERATION observation. Types: {obs_types}"
+    # 验证有工具相关的 span（通过名称判断）
+    tool_names = [o.get("name") for o in observations if o.get("name", "").startswith("tool-")]
+    assert len(tool_names) >= 1, f"Expected at least one tool span, got: {tool_names}"
 
-    print(f"\n✅ Langfuse: trace {trace_id[:16]}... has {len(trace.observations)} observations")
-    for obs in trace.observations:
-        print(f"   {obs.type}: {obs.name}")
+    print(f"\n✅ Langfuse: trace {trace_id[:16]}... has {len(observations)} observations")
+    for o in observations:
+        print(f"   {o.get('type')}: {o.get('name')}")

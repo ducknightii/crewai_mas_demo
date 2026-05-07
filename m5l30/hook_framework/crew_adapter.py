@@ -83,6 +83,15 @@ class CrewObservabilityAdapter:
                 last_msg = messages[-1]
                 content = last_msg.get("content", "") if isinstance(last_msg, dict) else str(last_msg)
                 preview = _truncate(str(content), 500)
+
+            # 从 LLM 对象提取真实模型名（Sub-Crew 使用不同模型时正确记录）
+            llm_model = ""
+            llm = getattr(context, "llm", None)
+            if llm:
+                llm_model = getattr(llm, "model", "") or ""
+                if isinstance(llm_model, str) and "/" in llm_model:
+                    llm_model = llm_model.rsplit("/", 1)[-1]
+
             self._last_prompt_preview = preview
 
             registry.dispatch(
@@ -92,7 +101,7 @@ class CrewObservabilityAdapter:
                     agent_id=agent_id,
                     session_id=sid,
                     turn_number=self._turn_count,
-                    metadata={"prompt_preview": preview},
+                    metadata={"prompt_preview": preview, "model": llm_model},
                 ),
             )
             return None
