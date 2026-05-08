@@ -170,3 +170,192 @@ class RetroOutput(BaseModel):
     retrospective_report:   RetroReport
     improvement_proposals:  list[ImprovementProposal]   # 最多3条
 ```
+
+---
+
+## 课堂代码演示学习指南
+
+本节帮你按课程教学顺序阅读代码，建立完整的理解链路。
+
+### 整体架构一览
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  种子数据 → 调度 → 自我复盘 → 审批 → 应用变更 → 闭环               │
+└─────────────────────────────────────────────────────────────────────┘
+
+seed_logs.py                     ← 生成7天模拟数据
+    ↓
+scheduler.py                     ← 双条件触发（24h + 5任务）
+    ↓
+PM: self_retrospective SKILL     ← 思考框架（非脚本）
+    ↓ 调用
+tools/log_query.py               ← 纯数据查询 CLI
+    ↓ LLM 推理分析
+schemas.py → RetroOutput JSON    ← root_cause 枚举 + before/after_text
+    ↓
+Manager: review_proposal SKILL   ← 分档审批（Tier 1/2/3）
+    ↓
+PM: 执行 before_text → after_text 替换
+    ↓
+workspace 文件已更新 → 下次执行改进生效
+```
+
+### 学习路线（建议按顺序阅读）
+
+---
+
+#### 第一步：理解数据模型——schemas.py
+
+**对应课文**：第四节"结构化复盘产出"
+
+**阅读文件**：`schemas.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| `L2LogRecord` | 任务级质量摘要：`quality_score`、`checkpoint_passed`、`issues` |
+| `ImprovementProposal` | `root_cause` 是 Literal 枚举（4 个值），不允许自由文本 |
+| `before_text` / `after_text` | 锚定替换：用原文定位 + 替换文本，而非行号或正则 |
+| `evidence: list[str]` | 不允许为空——每个提案必须有日志证据支撑 |
+| `RetroOutput` | `improvement_proposals` 最多 3 条——限制单次变更范围 |
+
+**理解要点**：`root_cause` 为什么是枚举而不是自由文本？课文引用了 Reflexion（NeurIPS 2023）的研究——自由文本反思会退化为"复述失败"（"下次注意移动端"），枚举强制分类到可执行的维度（`sop_gap` / `prompt_ambiguity` / `ability_gap` / `integration_issue`）。
+
+---
+
+#### 第二步：理解三层日志的写入机制
+
+**对应课文**：第一节"三层日志系统"
+
+**阅读文件**：
+
+**2a. `hooks/l2_task_callback.py`**（L2 自动写入）
+
+| 重点 | 看什么 |
+|------|--------|
+| `make_l2_task_callback()` | 工厂函数：绑定 `agent_id` + `logs_dir` → 返回闭包 |
+| 闭包内部 | CrewAI 任务完成时自动调用 → 创建 `L2LogRecord` → 调用 `write_l2()` |
+| `quality_scorer` | 可注入自定义评分函数，默认使用简单规则 |
+
+**2b. `tools/mailbox_ops.py`**（L1 AOP 自动写入）
+
+找到 `send_mail()` 中的新增逻辑：当 `to="human"` 时，自动写一条 L1 记录。这是旁路（AOP）模式——主流程不感知日志写入。
+
+**2c. `tools/log_ops.py`**（三层读写库）
+
+| 函数 | 层级 | 用途 |
+|------|------|------|
+| `write_l2()` / `read_l2()` | L2 | 任务质量摘要（90天） |
+| `write_l3()` / `read_l3()` | L3 | ReAct 步骤（30天） |
+| `read_l1()` | L1 | 人类纠正（永久） |
+| `purge_old_l3()` | L3 | 按保留期限清理 |
+
+---
+
+#### 第三步：理解数据查询 CLI——Agent 的"数据仪表盘"
+
+**对应课文**：第二节"Skill = 思考框架，Script = 数据查询"
+
+**阅读文件**：`tools/log_query.py`
+
+| 子命令 | 输出 | Agent 用来回答什么 |
+|-------|------|-----------------|
+| `stats` | 总任务数、成功率、平均质量分 | "整体表现如何？" |
+| `tasks` | 可排序/筛选的任务列表 | "哪些任务最差？" |
+| `steps` | 单个任务的 ReAct 步骤回放 | "这个任务哪一步出了问题？" |
+| `l1` | 人类纠正记录（支持关键词搜索） | "人类怎么看这个问题？" |
+| `all-agents` | 全员对比统计 | "哪个角色是瓶颈？" |
+
+**理解要点**：`log_query.py` 是纯数据工具——只查询不判断。所有分析、归因、决策都由 LLM 完成。这就是"Script 提供数据，Skill 提供思考框架，LLM 做推理"的分工。
+
+---
+
+#### 第四步：看复盘思考框架——核心教学 Skill
+
+**对应课文**：第二节"五个递进问题"
+
+**阅读文件**：`workspace/pm/skills/self_retrospective/SKILL.md`
+
+| 问题 | 对应数据源 | 漏斗层级 |
+|------|----------|---------|
+| 哪些任务质量差？ | `log_query.py tasks --sort quality_asc` | 量化定位 |
+| 哪个步骤出了问题？ | `log_query.py steps --task-id xxx` | 过程回放 |
+| 人类怎么看？ | `log_query.py l1 --keyword xxx` | 交叉验证 |
+| 根因是什么类型？ | 4 值枚举选择 | 分类归因 |
+| 改哪个文件的哪一段？ | `before_text` / `after_text` | 锚定修改 |
+
+**理解要点**：这是 Skill（思考框架），不是 Script（执行脚本）。它不规定"先调 stats 再调 tasks"的固定顺序，而是给 Agent 5 个递进问题，让 LLM 自己决定用什么工具、查什么数据。
+
+---
+
+#### 第五步：看审批和执行机制
+
+**对应课文**：第四节"三档 HITL 审批"
+
+**阅读文件**：
+
+**5a. `tools/proposal_ops.py`**
+
+| 函数 | 作用 |
+|------|------|
+| `classify_proposal_tier()` | `target_file` → Tier 1/2/3（memory → skill/agent → soul） |
+| `can_auto_approve_memory()` | Tier 1 硬闸门：每个 Agent 每天最多 3 次自动审批 |
+
+**5b. `workspace/manager/skills/review_proposal/SKILL.md`**
+
+| Tier | 目标文件 | 审批流程 |
+|------|---------|---------|
+| Tier 1 | memory.md | 自动审批（3次/天闸门） |
+| Tier 2 | agent.md / skills/*.md | Manager LLM 预审 + Human 审批 |
+| Tier 3 | soul.md | Human 强制审核 + 高风险标记 |
+
+**理解要点**：为什么 soul.md 需要最严格的审批？因为 soul 定义了决策偏好——如果 soul 被错误修改，后续所有判断（包括下一次复盘的判断）都会被污染。
+
+---
+
+#### 第六步：理解调度器——如何触发复盘
+
+**对应课文**：第三节"极薄 Scheduler"
+
+**阅读文件**：`scheduler.py`（~40行逻辑）
+
+| 重点 | 看什么 |
+|------|--------|
+| 双条件 | 距上次复盘 ≥ 24h **且** 最近 24h 有 ≥ 5 条 L2 记录 |
+| 触发动作 | 发 `retro_trigger` 邮件（不直接调用复盘） |
+| 设计哲学 | 调度器只判断"该不该做"，通过邮箱触发Agent自主执行 |
+
+---
+
+#### 第七步：看种子数据——理解演示场景
+
+**对应课文**：演示环节
+
+**阅读文件**：`seed_logs.py`
+
+| 生成内容 | 目的 |
+|---------|------|
+| 8 个 PM 任务（3 个低质量） | 提供可分析的失败案例 |
+| 3 个 L1 人类纠正 | 提供"黄金数据"让 Agent 交叉验证 |
+| L3 ReAct 步骤 | 提供步骤级回放数据 |
+| 重置 workspace 到 baseline | 确保复盘演示有可改进的文件 |
+
+运行 `python3 seed_logs.py` 后，用 `log_query.py` 验证：
+```bash
+python3 tools/log_query.py stats --agent-id pm --days 7
+python3 tools/log_query.py tasks --agent-id pm --sort quality_asc --limit 3
+python3 tools/log_query.py l1 --days 7
+```
+
+---
+
+### 学习检查清单
+
+完成以上七步后，你应该能回答：
+
+- [ ] L1/L2/L3 三层日志分别由谁写入？（L1: `send_mail` AOP，L2: `task_callback` hook，L3: session 日志复用）
+- [ ] `root_cause` 为什么是 4 值枚举而不是自由文本？（防止复述式反思）
+- [ ] `before_text` / `after_text` 的替换策略和 IDE 的"查找替换"有什么相似之处？
+- [ ] 为什么 `self_retrospective` 是 Skill 而不是 Script？（给思考框架，不定执行顺序）
+- [ ] Tier 1/2/3 审批为什么要按 `target_file` 分档？（影响深度不同，soul 最危险）
+- [ ] 复盘机制改动了 27 课的几行代码？（仅 `mailbox_ops.py` 新增 L1 AOP 写入一处）

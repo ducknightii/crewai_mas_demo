@@ -278,3 +278,167 @@ python3 m4l27/main.py
 ```bash
 python3 m4l27/main.py "你的自定义需求描述"
 ```
+
+---
+
+## 课堂代码演示学习指南
+
+本节帮你按课程教学顺序阅读代码，建立完整的理解链路。
+
+### 整体架构一览
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        三终端协作                                   │
+│                                                                    │
+│  Terminal 1          Terminal 2           Terminal 3                │
+│  main.py             human_cli.py         start_pm.py              │
+│  (Manager)           (Human)              (PM)                     │
+│                                                                    │
+│  Step1: 需求澄清 ──→ 确认节点1 ──→                                 │
+│  Step2: SOP 选择 ──→ 确认节点2 ──→                                 │
+│  Step3: 任务分配 ─────────────────→ Step4: PM 执行                  │
+│                   ←── 确认节点3 ←── PM 产出通知                     │
+│  Step5: 验收     ←──────────────── task_done                       │
+└────────────────────────────────────────────────────────────────────┘
+                            │
+                      ┌─────▼──────┐
+                      │ human.json │ ← 只有 Manager 可写
+                      │ pm.json    │ ← Manager 可写
+                      │ manager.json│ ← PM 可写
+                      └────────────┘
+```
+
+### 学习路线（建议按顺序阅读）
+
+---
+
+#### 第一步：理解单一接口原则——代码级强制
+
+**对应课文**：第二节"单一接口原则"
+
+**阅读文件**：`workspace/manager/skills/mailbox/scripts/mailbox_cli.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| `_is_human_inbox()` 判断 | 检测目标邮箱是否是 `human.json` |
+| 权限校验（约第77行） | `if _is_human_inbox(args.to) and args.from_ != "manager"` → 返回 errcode=1 |
+| `check-human` 子命令 | Manager 轮询 Human 确认状态的接口 |
+
+**理解要点**：PM 不能给 Human 发邮件，这不是 prompt 级约束（"请不要直接联系甲方"），而是代码级强制（CLI 直接拒绝）。这就是课文说的"把决策权交给代码，不交给 LLM"。
+
+**验证**：`python3 -m pytest test_m4l27.py -v -k "TestSingleInterface"` 看权限校验测试。
+
+---
+
+#### 第二步：理解 Human 邮箱的简化设计
+
+**对应课文**：第三节"两态 vs 三态"
+
+**对比阅读**：
+
+| 邮箱 | Schema | 为什么 |
+|------|--------|--------|
+| `manager.json` / `pm.json` | 三态：`unread → in_progress → done` | Agent 可能崩溃，需要 `reset_stale` 恢复 |
+| `human.json` | 二态：`read: false/true` | Human 不会崩溃，不需要 `in_progress` 中间态 |
+
+**阅读文件**：看 `mailbox_cli.py` 中 `human.json` 的读写逻辑，对比 Agent 邮箱的三态机制。
+
+---
+
+#### 第三步：看 Human CLI——异步交互的实现
+
+**对应课文**：第四节"异步 Human"
+
+**阅读文件**：`human_cli.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| 交互模式 | 轮询 `human.json` → 显示未读消息 → Human 输入 y/n |
+| `check` 子命令 | 非交互式查看未读消息（脚本化测试用） |
+| `respond` 子命令 | 非交互式确认/拒绝（`respond <msg_id> y/n [feedback]`） |
+| 拒绝 + 反馈 | `n` 时可以附带文字反馈，写入 `human_feedback` 字段 |
+
+**理解要点**：Manager 发完确认请求就退出（不阻塞等待），Human 随时用 `human_cli.py` 处理。下次 `main.py` 启动时，Manager 通过 `check-human` 命令检查确认状态。
+
+---
+
+#### 第四步：看 Manager 的四个场景如何驱动
+
+**对应课文**：第三节"三个工程介入点"
+
+**阅读文件**：`workspace/manager/agent.md`
+
+找到四个场景的工作规范：
+
+| 场景 | 触发条件 | Manager 做什么 | 结束动作 |
+|------|---------|---------------|---------|
+| 场景1 | 新项目请求 | init_project → 需求澄清 → 写 requirements.md → 通知 Human | 发 `needs_confirm` 到 human.json |
+| 场景2 | Human 确认需求后 | 选择 SOP → 通知 Human 确认 | 发 `sop_confirm` 到 human.json |
+| 场景3 | SOP 确认后 | 给 PM 发 `task_assign` | 发邮件到 pm.json |
+| 场景4 | PM 完成后 | 读产品文档 → 验收 → 写报告 | 标记 task_done |
+
+**理解要点**：每个场景都以"发消息然后退出"结束——Manager 从不阻塞等待。人类介入是自然的"断点"，不是人为的阻塞。
+
+---
+
+#### 第五步：看新增的 Skills
+
+**对应课文**：第三节对应的工程实现
+
+**阅读文件**：`workspace/manager/skills/` 下的新增 Skill
+
+| Skill | 类型 | 作用 |
+|-------|------|------|
+| `requirements_discovery/SKILL.md` | reference | 四维需求框架（目标/边界/约束/风险） |
+| `sop_creator/SKILL.md` | reference | SOP 模板设计（角色/步骤/检查点/质量标准） |
+| `sop_selector/SKILL.md` | task | 从 SOP 库选最佳匹配 → 复制为 `active_sop.md` |
+| `notify_human/SKILL.md` | reference | 通知 Human 的规则和 5 种消息类型 |
+
+**理解要点**：需求澄清和 SOP 选择不是硬编码在代码里的流程，而是通过 Skill 文件描述的思考框架。Agent 按 Skill 指引决定何时需要通知 Human。
+
+---
+
+#### 第六步：理解 SOP 共创——时点 A
+
+**对应课文**：第三节"SOP 制定"
+
+**阅读文件**：`sop_setup.py`（~20行）
+
+| 重点 | 看什么 |
+|------|--------|
+| 入口逻辑 | 启动 Manager，指定加载 `sop_creator` Skill |
+| SOP 产出 | 写入 `workspace/shared/sop/` 目录 |
+| Human 确认 | Manager 发确认请求到 `human.json`，Human 通过 `human_cli.py` 审核 |
+
+**理解要点**：SOP 共创（时点A）和任务执行（时点B）完全解耦——SOP 是提前准备好的"作战计划"，不需要每次执行任务时重新制定。
+
+---
+
+#### 第七步：验证——跑测试看效果
+
+```bash
+cd /path/to/crewai_mas_demo
+
+# 1. 单元测试（18个，不需要沙盒/API）
+python3 -m pytest m4l27/test_m4l27.py -v -k "not needs_llm"
+
+# 2. 重点关注这些测试：
+#    - TestSinglePointOfContact：PM 写 human.json 被拒绝
+#    - TestHumanJsonSchema：human.json 的二态 schema 验证
+#    - TestHumanCli：交互式和命令式确认/拒绝
+#    - TestCheckHumanCommand：Manager 轮询 Human 确认状态
+```
+
+---
+
+### 学习检查清单
+
+完成以上七步后，你应该能回答：
+
+- [ ] 为什么 PM 不能直接给 Human 发邮件？（单一接口原则，代码级强制）
+- [ ] Agent 邮箱用三态，Human 邮箱用二态，为什么设计不同？
+- [ ] Manager 如何知道 Human 已经确认了？（`check-human` 命令轮询 `human.json`）
+- [ ] 如果 Human 拒绝了需求文档，反馈信息存在哪里？（`human.json` 的 `human_feedback` 字段）
+- [ ] 为什么 SOP 制定（时点A）和任务执行（时点B）要解耦？
+- [ ] 如果去掉所有 Human 确认节点，代码需要改多少？（零行——只是不再往 human.json 发消息）

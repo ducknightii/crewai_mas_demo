@@ -199,3 +199,158 @@ docker compose -f sandbox-docker-compose.yaml --profile manager --profile pm dow
 
 **Q：模型切换？**
 → 修改 `main.py` 和 `start_pm.py` 中的 `model` 参数（默认 `glm-5.1`）。
+
+---
+
+## 课堂代码演示学习指南
+
+本节帮你按课程教学顺序阅读代码，建立完整的理解链路。
+
+### 整体架构一览
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  main.py（Manager）           start_pm.py（PM）                │
+│  自动判断模式：分配 or 验收    固定模式：检查邮箱 + 执行任务     │
+└───────────┬──────────────────────────┬─────────────────────────┘
+            │                          │
+            ▼                          ▼
+┌────────────────────────────────────────────────────────────────┐
+│  DigitalWorkerCrew（通用框架，25课同一个类）                     │
+│  角色身份来自 workspace/{role}/*.md                             │
+└───────────┬──────────────────────────┬─────────────────────────┘
+            │                          │
+            ▼                          ▼
+┌─────────────────────┐    ┌─────────────────────┐
+│ workspace/manager/  │    │ workspace/pm/       │
+│ skills/mailbox/     │    │ skills/mailbox/     │
+│ skills/init_project/│    │ skills/product_     │
+│                     │    │       design/       │
+└─────────┬───────────┘    └──────────┬──────────┘
+          │        通过邮箱通信         │
+          └──────────┬─────────────────┘
+                     ▼
+          ┌─────────────────────┐
+          │ workspace/shared/   │
+          │ mailboxes/*.json    │ ← 三态状态机
+          │ needs/*.md          │ ← Manager 写
+          │ design/*.md         │ ← PM 写
+          └─────────────────────┘
+```
+
+### 学习路线（建议按顺序阅读）
+
+---
+
+#### 第一步：理解三态状态机——邮箱的核心
+
+**对应课文**：第三节"三态邮件状态机"
+
+**阅读文件**：`tools/mailbox_ops.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| `send_mail()` | 邮件结构：`id`, `type`, `from_`, `to`, `subject`, `body`, `status="unread"` |
+| `read_inbox()` | 原子操作：读取时立刻标记为 `in_progress` + 记录 `processing_since` 时间戳 |
+| `mark_done()` | 处理完成后标记为 `done` |
+| `reset_stale()` | 崩溃恢复：超时的 `in_progress` 消息重置为 `unread` |
+| `FileLock` 使用 | 每次读写都在锁内完成，防止并发冲突 |
+
+**理解要点**：为什么不用简单的 `read: bool`？因为 Agent 可能在读取后、处理完成前崩溃。`in_progress` + `processing_since` 实现了类似 AWS SQS Visibility Timeout 的模式，崩溃后可以通过 `reset_stale()` 恢复。
+
+**验证**：`python3 -m pytest test_m4l26.py -v -k "TestThreeState"` 看完整状态转换测试。
+
+---
+
+#### 第二步：理解共享工作区——状态如何共享
+
+**对应课文**：第二节"共享工作区"
+
+**阅读文件**：`tools/workspace_ops.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| `create_workspace()` | 创建三个目录：`needs/`（Manager 写）、`design/`（PM 写）、`mailboxes/`（双方读写） |
+| `WORKSPACE_RULES.md` 生成 | 每个目录有单一 Owner，权限规则写入文件供 Agent 读取 |
+| 幂等性 | 目录已存在则跳过，不会覆盖 |
+
+**理解要点**：权限边界不是硬安全限制，而是"收窄 Agent 的注意力"——让它知道该往哪写，不该动哪里。
+
+---
+
+#### 第三步：看 Agent 的工作规范如何驱动协作
+
+**对应课文**：第四节"路径引用传递"
+
+**3a. `workspace/manager/agent.md`**
+
+找到两个场景：
+- **场景1（新项目）**：init_project → 写需求文档 → 发 `task_assign` 邮件给 PM（只传路径引用！）
+- **场景2（验收）**：读邮箱 → 读 PM 产出 → 写验收报告
+
+**3b. `workspace/pm/agent.md`**
+
+找到 7 步工作流：读邮箱 → 读需求 → 加载 product_design Skill → 写产品文档 → 发 `task_done` → 标记消息完成
+
+**理解要点**：邮件内容只传路径（"请读 /mnt/shared/needs/requirements.md"），不传文档全文。这是核心设计原则——文件在共享工作区，邮件只是触发器。
+
+---
+
+#### 第四步：理解沙盒挂载——两个 Agent 如何共享文件系统
+
+**对应课文**：第二节"状态共享"
+
+**阅读文件**：`sandbox-docker-compose.yaml`
+
+| 容器 | 端口 | 挂载 |
+|------|------|------|
+| Manager | 8025 | `workspace/manager` → `/workspace`，`workspace/shared` → `/mnt/shared` |
+| PM | 8026 | `workspace/pm` → `/workspace`，`workspace/shared` → `/mnt/shared` |
+
+**理解要点**：两个沙盒各有私有的 `/workspace`（互不可见），但共享同一个 `/mnt/shared`。Manager 写到 `/mnt/shared/needs/`，PM 从 `/mnt/shared/needs/` 读取。
+
+---
+
+#### 第五步：看入口如何串联三步任务链
+
+**对应课文**：第五节"端到端演示"
+
+**阅读文件**：`main.py`
+
+| 重点区域 | 看什么 |
+|---------|--------|
+| `_has_pending_task_done()` | 检查 `manager.json` 是否有未处理的 `task_done` 消息 |
+| 模式自动切换 | 有 `task_done` → 验收模式；没有 → 分配模式 |
+| `_build_user_request()` | 根据模式构建不同的 prompt |
+
+**理解要点**：同一个 `main.py` 跑两次，行为完全不同——第一次分配任务，第二次验收交付。切换依据是文件系统状态（邮箱内容），不是命令行参数或 LLM 自我判断。
+
+---
+
+#### 第六步：验证——跑测试看效果
+
+```bash
+cd /path/to/crewai_mas_demo
+
+# 1. 单元测试（61个，不需要沙盒/API）
+python3 -m pytest m4l26/test_m4l26.py -v
+
+# 2. 重点关注这些测试：
+#    - TestThreeStateMachine：完整状态转换 unread→in_progress→done + reset_stale
+#    - TestSendMailFields：邮件结构字段验证
+#    - TestReadInboxAtomicity：读取的原子性（读的同时标记 in_progress）
+#    - TestConcurrentWriteSafety：FileLock 并发安全
+```
+
+---
+
+### 学习检查清单
+
+完成以上六步后，你应该能回答：
+
+- [ ] 为什么邮箱要用三态（unread/in_progress/done）而不是二态（unread/done）？
+- [ ] `read_inbox()` 为什么在读取的同时就标记为 `in_progress`？（防止另一个进程重复取走）
+- [ ] `reset_stale()` 解决什么问题？（Agent 崩溃后消息不会永远丢失）
+- [ ] 邮件内容为什么只传路径引用而不传文档全文？
+- [ ] `main.py` 如何实现"第一次分配、第二次验收"的模式切换？（检查邮箱状态，不靠 LLM）
+- [ ] 两个沙盒如何共享文件？（Docker volume 挂载同一个 `workspace/shared` 目录）

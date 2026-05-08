@@ -189,3 +189,40 @@ class TestExecuteSkillAsyncMountDesc:
             or (call_kwargs.args[2] if len(call_kwargs.args) > 2 else None)
         )
         assert passed_mount == custom_mount
+
+    @pytest.mark.asyncio
+    async def test_task_skill_passes_step_callback_to_build_skill_crew(
+        self, tmp_path
+    ):
+        """task 型 Skill 执行时，build_skill_crew 被以 step_callback 调用"""
+        (tmp_path / "load_skills.yaml").write_text(
+            "skills:\n  - name: fake-skill\n    type: task\n    enabled: true",
+            encoding="utf-8",
+        )
+        (tmp_path / "fake-skill").mkdir()
+        (tmp_path / "fake-skill" / "SKILL.md").write_text(
+            "---\nname: fake-skill\ndescription: test\n---\n正文",
+            encoding="utf-8",
+        )
+
+        custom_step_cb = MagicMock()
+        custom_task_cb = MagicMock()
+
+        with patch(f"{_MODULE}.SKILLS_DIR", tmp_path):
+            tool = SkillLoaderTool(
+                step_callback=custom_step_cb,
+                task_callback=custom_task_cb,
+            )
+
+        mock_crew = MagicMock()
+        mock_crew.akickoff = AsyncMock(return_value="ok")
+
+        with patch(f"{_MODULE}.build_skill_crew", return_value=mock_crew) as mock_build:
+            await tool._execute_skill_async("fake-skill", "任务描述")
+
+        call_kwargs = mock_build.call_args
+        assert call_kwargs is not None
+        passed_step = call_kwargs.kwargs.get("step_callback")
+        passed_task = call_kwargs.kwargs.get("task_callback")
+        assert passed_step is custom_step_cb
+        assert passed_task is custom_task_cb

@@ -1,0 +1,12 @@
+version: "3.8"
+services:
+  aio-sandbox:
+    image: ghcr.io/agent-infra/sandbox:latest
+    ports:
+      - "8030:8080"
+    volumes:
+      - ./workspace/demo_agent/skills:/mnt/skills:ro
+      - ./workspace/demo_agent/output:/workspace/output:rw
+      - ./func_metadata_patched.py:/opt/python3.12/lib/python3.12/site-packages/mcp/server/fastmcp/utilities/func_metadata.py:ro
+    security_opt:
+      - seccomp:unconfined
